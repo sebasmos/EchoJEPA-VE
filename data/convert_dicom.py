@@ -1,82 +1,126 @@
+"""
+Convert MIMIC-IV-Echo DICOM files to MP4 videos.
+
+Recursively walks the input directory, converts multi-frame DICOMs to MP4 videos,
+and skips single-frame (static) images.
+
+Usage:
+    python data/convert_dicom.py --limit 5                    # test with 5 files
+    python data/convert_dicom.py --target_size 384            # for ViT-g/16_384
+    python data/convert_dicom.py                              # convert all (256x256)
+"""
+
+import argparse
 import os
-import pydicom
-import numpy as np
+
 import cv2
+import numpy as np
+import pydicom
 
-# --- Configuration ---
-INPUT_DIR = './mimic_p10_dcm'      # Folder where you downloaded the S3 files
-OUTPUT_DIR = './mimic_p10_mp4' # Folder to save videos
-TARGET_SIZE = (336, 336)       # (Width, Height)
-FPS = 30                       # Frames Per Second for output video
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Convert DICOM to MP4")
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        default="/orcd/pool/006/lceli_shared/data_delete/mimic-iv-echo/physionet.org/files/mimic-iv-echo/0.1/files",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="/orcd/pool/006/lceli_shared/data_delete/mimic-iv-echo-mp4",
+    )
+    parser.add_argument("--target_size", type=int, default=256)
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--limit", type=int, default=0, help="Max files to convert (0 = all)")
+    return parser.parse_args()
 
-def process_dicom(file_path):
-    filename = os.path.basename(file_path)
-    save_path = os.path.join(OUTPUT_DIR, filename.replace('.dcm', '.mp4'))
-    
-    try:
-        ds = pydicom.dcmread(file_path)
-        
-        # Check if pixel data exists
-        if 'PixelData' not in ds:
-            print(f"Skipping {filename}: No pixel data found.")
-            return
 
-        # Extract pixel array (Frames, Height, Width)
-        # Note: Some DICOMs are (Frames, H, W, Channels). This handles grayscale (H, W) or (F, H, W).
-        pixel_array = ds.pixel_array
-        
-        # If the image is 2D (single frame), add a dimension to make it 3D (1, H, W)
-        if pixel_array.ndim == 2:
-            pixel_array = pixel_array[np.newaxis, ...]
+def process_dicom(file_path, save_path, target_size, fps):
+    """Convert a single DICOM to MP4. Returns (status, reason)."""
+    ds = pydicom.dcmread(file_path)
 
-        # --- Normalization ---
-        # DICOM data can range widely (e.g., 0-4096). We must scale to 0-255 for MP4.
-        pixel_array = pixel_array.astype(float)
-        p_min = pixel_array.min()
-        p_max = pixel_array.max()
-        
-        # Avoid division by zero
-        if p_max - p_min != 0:
-            pixel_array = ((pixel_array - p_min) / (p_max - p_min)) * 255.0
+    if "PixelData" not in ds:
+        return "skipped", "no pixel data"
+
+    pixel_array = ds.pixel_array
+
+    # Single-frame (2D) → skip
+    if pixel_array.ndim == 2:
+        return "skipped", "single frame"
+
+    num_frames = pixel_array.shape[0]
+    if num_frames < 2:
+        return "skipped", f"only {num_frames} frame(s)"
+
+    # Normalize to 0-255
+    pixel_array = pixel_array.astype(np.float32)
+    p_min, p_max = pixel_array.min(), pixel_array.max()
+    if p_max - p_min > 0:
+        pixel_array = ((pixel_array - p_min) / (p_max - p_min)) * 255.0
+    else:
+        pixel_array = np.zeros_like(pixel_array)
+    pixel_array = pixel_array.astype(np.uint8)
+
+    # Write MP4
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    size = (target_size, target_size)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(save_path, fourcc, fps, size, isColor=True)
+
+    for frame in pixel_array:
+        resized = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
+        if resized.ndim == 2:
+            bgr = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
         else:
-            pixel_array = np.zeros_like(pixel_array)
-            
-        pixel_array = pixel_array.astype(np.uint8)
+            bgr = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
+        out.write(bgr)
 
-        # --- Video Writing ---
-        # OpenCV VideoWriter setup
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(save_path, fourcc, FPS, TARGET_SIZE, isColor=True)
+    out.release()
+    return "converted", f"{num_frames} frames"
 
-        for frame in pixel_array:
-            # Resize frame to 336x336
-            resized_frame = cv2.resize(frame, TARGET_SIZE, interpolation=cv2.INTER_AREA)
-            
-            # Convert Grayscale to RGB (MP4 usually expects 3 channels)
-            # If your source is already RGB, you can skip the conversion, but most Echo DICOMs are monochrome or palette color.
-            if resized_frame.ndim == 2:
-                bgr_frame = cv2.cvtColor(resized_frame, cv2.COLOR_GRAY2BGR)
+
+def main():
+    args = parse_args()
+
+    # Recursively collect all .dcm files
+    dcm_files = []
+    for root, _, files in os.walk(args.input_dir):
+        for f in files:
+            if f.endswith(".dcm"):
+                dcm_files.append(os.path.join(root, f))
+    dcm_files.sort()
+
+    if args.limit > 0:
+        dcm_files = dcm_files[: args.limit]
+
+    print(f"Found {len(dcm_files)} DICOM file(s) to process")
+    print(f"Target size: {args.target_size}x{args.target_size}")
+
+    converted = 0
+    skipped = 0
+    errored = 0
+
+    for i, dcm_path in enumerate(dcm_files):
+        # Preserve relative path structure: p10/p10036337/s91664836/file.mp4
+        rel_path = os.path.relpath(dcm_path, args.input_dir)
+        save_path = os.path.join(args.output_dir, rel_path.replace(".dcm", ".mp4"))
+
+        try:
+            status, reason = process_dicom(dcm_path, save_path, args.target_size, args.fps)
+            if status == "converted":
+                converted += 1
+                print(f"  [{i+1}/{len(dcm_files)}] OK: {rel_path} ({reason})")
             else:
-                # If already RGB (or YBR), assume BGR for OpenCV
-                bgr_frame = cv2.cvtColor(resized_frame, cv2.COLOR_RGB2BGR)
+                skipped += 1
+                print(f"  [{i+1}/{len(dcm_files)}] SKIP: {rel_path} ({reason})")
+        except Exception as e:
+            errored += 1
+            print(f"  [{i+1}/{len(dcm_files)}] ERROR: {rel_path} ({e})")
 
-            out.write(bgr_frame)
+    print(f"\nDone! converted={converted}, skipped={skipped}, errored={errored}")
+    print(f"Output directory: {args.output_dir}")
 
-        out.release()
-        print(f"Success: {save_path}")
 
-    except Exception as e:
-        print(f"Error processing {filename}: {e}")
-
-# --- Main Loop ---
-print("Starting conversion...")
-files = [f for f in os.listdir(INPUT_DIR) if f.endswith('.dcm')]
-
-if not files:
-    print("No .dcm files found in the input directory.")
-else:
-    for f in files:
-        process_dicom(os.path.join(INPUT_DIR, f))
-    print("Done!")
+if __name__ == "__main__":
+    main()
