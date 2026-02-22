@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=download_echo
 #SBATCH --partition=mit_preemptable
-#SBATCH --array=0-99
+#SBATCH --array=0-19
 #SBATCH --time=48:00:00
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
@@ -30,7 +30,7 @@ MANIFEST="${LOGDIR}/manifest.txt"
 BASE_URL="https://physionet.org/files/mimic-iv-echo/0.1"
 
 TASK_ID=${SLURM_ARRAY_TASK_ID}
-NUM_TASKS=100
+NUM_TASKS=20
 PROGRESS_LOG="${LOGDIR}/progress_chunk_${TASK_ID}.log"
 
 # Load credentials from .env
@@ -91,6 +91,8 @@ while IFS= read -r filepath; do
 
     # Download directly (no recursive crawl)
     wget -q -N -c \
+        --tries=5 --waitretry=10 --retry-connrefused \
+        --timeout=60 \
         --user "$PN_USER" --password "$PN_PASS" \
         -O "$LOCAL_FILE" \
         "${BASE_URL}/${filepath}" 2>/dev/null
