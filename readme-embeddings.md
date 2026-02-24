@@ -83,33 +83,37 @@ python data/convert_dicom.py --target_size 384 \
 
 ## 5. Stage 2: Extract Embeddings
 
-The extraction script loads a frozen V-JEPA2 encoder, processes each MP4 video, and saves mean-pooled embeddings.
+The extraction script loads a frozen V-JEPA2 encoder, processes each MP4 video, and saves mean-pooled embeddings. Uses parallel DataLoader for fast GPU utilization.
+
+All extraction scripts live in [`scripts/extract-embeddings/`](scripts/extract-embeddings/). See [`scripts/extract-embeddings/README.md`](scripts/extract-embeddings/README.md) for detailed SLURM configuration.
 
 ```bash
 cd /home/sebasmos/orcd/pool/code/EchoJEPA-VE
 
-# ViT-L (1024-d embeddings)
-python scripts/extract_embeddings.py --model vitl
+# Single folder (interactive)
+python scripts/extract-embeddings/extract_embeddings.py --model vitl --folder p10 --num_workers 4
 
-# ViT-H (1280-d embeddings)
-python scripts/extract_embeddings.py --model vith
+# Full run via SLURM (10-folder array, 1 L40S GPU per folder)
+sbatch scripts/extract-embeddings/extract_slurm.sh vitl
 
-# ViT-g (1408-d embeddings)
-python scripts/extract_embeddings.py --model vitg
+# Single folder via SLURM
+sbatch --array=0 scripts/extract-embeddings/extract_slurm.sh vitl   # p10 only
 
-# ViT-g/384 (1408-d embeddings, requires 384px MP4s)
-python scripts/extract_embeddings.py --model vitg-384 \
-    --input_dir /orcd/pool/006/lceli_shared/data_delete/mimic-iv-echo-mp4-384
+# Merge per-folder files into one
+python scripts/extract-embeddings/merge_embeddings.py --model vitl
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--model` | `vitl` | Model variant: vitl, vith, vitg, vitg-384 |
-| `--input_dir` | mimic-iv-echo-mp4 | Directory with MP4 files |
+| `--input_dir` | `/orcd/pool/006/lceli_shared/mimic-iv-echo-mp4` | Directory with MP4 files |
+| `--folder` | None | Single subfolder (e.g. `p10`) for array jobs |
 | `--checkpoint` | auto from `--model` | Path to .pt weights |
 | `--output_path` | auto from `--model` | Output .pt path |
-| `--img_size` | auto from `--model` | Input resolution |
+| `--batch_size` | auto per model | Override GPU batch size |
+| `--num_workers` | 8 | DataLoader workers (0 = sequential) |
 | `--num_frames` | 16 | Frames to sample per video |
+| `--save_every` | 10000 | Checkpoint interval |
 | `--limit` | 0 (all) | Max files to process |
 
 ## 6. Stage 3: Inspect & Visualize
@@ -140,7 +144,7 @@ cd /home/sebasmos/orcd/pool/code/EchoJEPA-VE
 python data/convert_dicom.py --limit 5
 
 # Stage 2: Extract ViT-L embeddings
-python scripts/extract_embeddings.py --model vitl --limit 5
+python scripts/extract-embeddings/extract_embeddings.py --model vitl --limit 5 --num_workers 0
 
 # Stage 3: Open notebook to inspect
 jupyter notebook notebooks/inspect_embeddings.ipynb
@@ -149,41 +153,60 @@ jupyter notebook notebooks/inspect_embeddings.ipynb
 ## 8. Full Run
 
 ```bash
+cd /home/sebasmos/orcd/pool/code/EchoJEPA-VE
+
 # Stage 1: Convert all DICOMs (run once)
 python data/convert_dicom.py
 
-# Stage 2: Extract embeddings for each model
-python scripts/extract_embeddings.py --model vitl
-python scripts/extract_embeddings.py --model vith
-python scripts/extract_embeddings.py --model vitg
+# Stage 2: Extract embeddings (10-folder SLURM array)
+sbatch scripts/extract-embeddings/extract_slurm.sh vitl
 
-# For vitg-384, need 384px MP4s
+# Stage 2b: Merge per-folder outputs
+python scripts/extract-embeddings/merge_embeddings.py --model vitl
+
+# For other models:
+sbatch scripts/extract-embeddings/extract_slurm.sh vith
+sbatch scripts/extract-embeddings/extract_slurm.sh vitg
+
+# For vitg-384, need 384px MP4s first
 python data/convert_dicom.py --target_size 384 \
     --output_dir /orcd/pool/006/lceli_shared/data_delete/mimic-iv-echo-mp4-384
-python scripts/extract_embeddings.py --model vitg-384 \
-    --input_dir /orcd/pool/006/lceli_shared/data_delete/mimic-iv-echo-mp4-384
+sbatch scripts/extract-embeddings/extract_slurm.sh vitg-384
 ```
 
 ## 9. Output Format
 
-Embeddings are saved as a Python dict: `{relative_path: tensor}`.
+Embeddings are saved per folder as Python dicts: `{relative_path: tensor}`.
+
+```
+/orcd/pool/006/lceli_shared/jepa-embeddings-mimiciv-echo/
+├── vitl_embeddings_p10.pt   (~210 MB, ~51K embeddings)
+├── vitl_embeddings_p11.pt
+├── ...
+├── vitl_embeddings_p19.pt
+└── vitl_embeddings_all.pt   (merged, ~2.1 GB)
+```
 
 ```python
 import torch
 
-embeddings = torch.load("/orcd/pool/006/lceli_shared/embeddings/vitl_embeddings.pt")
+# Load single folder
+embeddings = torch.load("/orcd/pool/006/lceli_shared/jepa-embeddings-mimiciv-echo/vitl_embeddings_p10.pt")
+
+# Load merged file (all folders)
+embeddings = torch.load("/orcd/pool/006/lceli_shared/jepa-embeddings-mimiciv-echo/vitl_embeddings_all.pt")
 
 # Iterate
 for filename, emb in embeddings.items():
-    print(filename, emb.shape)  # e.g. "p10/p10036337/s91664836/file.mp4", torch.Size([1024])
+    print(filename, emb.shape)  # e.g. "p10036337/s91664836/file.mp4", torch.Size([1024])
 
 # Stack into a matrix
 all_embs = torch.stack(list(embeddings.values()))  # [N, embed_dim]
 ```
 
-| Model | Output file | Shape per video |
-|---|---|---|
-| vitl | `vitl_embeddings.pt` | `[1024]` |
-| vith | `vith_embeddings.pt` | `[1280]` |
-| vitg | `vitg_embeddings.pt` | `[1408]` |
-| vitg-384 | `vitg-384_embeddings.pt` | `[1408]` |
+| Model | Per-folder file | Merged file | Shape per video |
+|---|---|---|---|
+| vitl | `vitl_embeddings_p{10..19}.pt` | `vitl_embeddings_all.pt` | `[1024]` |
+| vith | `vith_embeddings_p{10..19}.pt` | `vith_embeddings_all.pt` | `[1280]` |
+| vitg | `vitg_embeddings_p{10..19}.pt` | `vitg_embeddings_all.pt` | `[1408]` |
+| vitg-384 | `vitg-384_embeddings_p{10..19}.pt` | `vitg-384_embeddings_all.pt` | `[1408]` |
