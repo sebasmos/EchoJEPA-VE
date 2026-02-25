@@ -176,6 +176,8 @@ sbatch scripts/extract-embeddings/extract_slurm.sh vitg-384
 
 ## 9. Output Format
 
+### PyTorch (.pt)
+
 Embeddings are saved per folder as Python dicts: `{relative_path: tensor}`.
 
 ```
@@ -210,3 +212,39 @@ all_embs = torch.stack(list(embeddings.values()))  # [N, embed_dim]
 | vith | `vith_embeddings_p{10..19}.pt` | `vith_embeddings_all.pt` | `[1280]` |
 | vitg | `vitg_embeddings_p{10..19}.pt` | `vitg_embeddings_all.pt` | `[1408]` |
 | vitg-384 | `vitg-384_embeddings_p{10..19}.pt` | `vitg-384_embeddings_all.pt` | `[1408]` |
+
+### Parquet (for Hugging Face)
+
+The `.pt` files are also converted to sharded Parquet with all MIMIC-IV-Echo metadata pre-joined, so each row is self-contained:
+
+```bash
+python scripts/extract-embeddings/to_parquet.py --model vitl
+```
+
+```
+mimic-iv-echo-jepa-embeddings/
+└── jepa-l-embeddings/
+    ├── train-00000-of-00010.parquet   (p10, 51K rows, 202 MB)
+    ├── ...
+    └── train-00009-of-00010.parquet   (p19, 53K rows, 208 MB)
+```
+
+| Column | Type | Source |
+|--------|------|--------|
+| `subject_id` | int64 | echo-record-list.csv |
+| `study_id` | int64 | echo-record-list.csv |
+| `dicom_id` | str | filename |
+| `file_path` | str | embedding key |
+| `acquisition_datetime` | str | echo-record-list.csv |
+| `study_datetime` | str | echo-study-list.csv |
+| `note_id` | str (nullable) | echo-study-list.csv |
+| `note_seq` | str (nullable) | echo-study-list.csv |
+| `note_charttime` | str (nullable) | echo-study-list.csv |
+| `embedding` | list[float32] | 1024-dim V-JEPA2 embedding |
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("parquet", data_dir="jepa-l-embeddings/")
+print(ds["train"][0])  # {'subject_id': 10002221, 'embedding': [...], ...}
+```
