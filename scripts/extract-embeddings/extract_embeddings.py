@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import src.datasets.utils.video.transforms as video_transforms
 import src.datasets.utils.video.volume_transforms as volume_transforms
-from src.models.vision_transformer import vit_giant_xformers, vit_huge, vit_large
+from src.models.vision_transformer import vit_base, vit_giant_xformers, vit_huge, vit_large
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -37,10 +37,22 @@ WEIGHTS_DIR = "/orcd/pool/006/lceli_shared/weights"
 EMBEDDINGS_DIR = "/orcd/pool/006/lceli_shared/jepa-embeddings-mimiciv-echo"
 
 MODEL_REGISTRY = {
+    # V-JEPA2 natural image pretrained
     "vitl": {"constructor": vit_large, "embed_dim": 1024, "img_size": 256, "batch_size": 256},
     "vith": {"constructor": vit_huge, "embed_dim": 1280, "img_size": 256, "batch_size": 128},
     "vitg": {"constructor": vit_giant_xformers, "embed_dim": 1408, "img_size": 256, "batch_size": 64},
     "vitg-384": {"constructor": vit_giant_xformers, "embed_dim": 1408, "img_size": 384, "batch_size": 16},
+    # EchoJEPA — fine-tuned on MIMIC-IV-Echo (Alif Munim / Bo Wang lab)
+    "echo-vitl-scratch": {"constructor": vit_large, "embed_dim": 1024, "img_size": 256, "batch_size": 256,
+                          "checkpoint": "vitl-scratch-pt-210-c25.pt"},
+    "echo-vitl-mimic117": {"constructor": vit_large, "embed_dim": 1024, "img_size": 256, "batch_size": 256,
+                           "checkpoint": "vjepa21_vitl_mimic_pt117.pt"},
+    "echo-vitb-mimic169": {"constructor": vit_base, "embed_dim": 768, "img_size": 256, "batch_size": 512,
+                           "checkpoint": "vjepa2_1_vitb_mimic_pt169_c60.pt"},
+    "echo-vitl-mimic100": {"constructor": vit_large, "embed_dim": 1024, "img_size": 256, "batch_size": 256,
+                           "checkpoint": "vjepa21_vitl_mimic_pt100.pt"},
+    "echo-vitl-vmix22m":  {"constructor": vit_large, "embed_dim": 1024, "img_size": 256, "batch_size": 256,
+                           "checkpoint": "vitl-vmix22m-pt220-c55.pt"},
 }
 
 
@@ -137,7 +149,8 @@ def parse_args():
     # Auto-resolve defaults from model registry
     cfg = MODEL_REGISTRY[args.model]
     if args.checkpoint is None:
-        args.checkpoint = os.path.join(WEIGHTS_DIR, f"{args.model}.pt")
+        ckpt_file = cfg.get("checkpoint", f"{args.model}.pt")
+        args.checkpoint = os.path.join(WEIGHTS_DIR, ckpt_file)
     if args.output_path is None:
         suffix = f"_{args.folder}" if args.folder else ""
         args.output_path = os.path.join(EMBEDDINGS_DIR, f"{args.model}_embeddings{suffix}.pt")
