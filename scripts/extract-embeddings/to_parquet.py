@@ -74,9 +74,17 @@ def main():
     parser.add_argument("--model", default="vitl", help="Model name (default: vitl)")
     parser.add_argument("--embeddings_dir", default=EMBEDDINGS_DIR)
     parser.add_argument("--metadata_dir", default=METADATA_DIR)
+    parser.add_argument("--subfolder", default=None, help="Output subfolder name inside mimic-iv-echo-jepa-embeddings/ (default: derived from model name)")
+    parser.add_argument("--folders", default=None, help="Comma-separated list of folders to process, e.g. p10,p11,p12 (default: all p10-p19)")
     args = parser.parse_args()
 
-    out_dir = os.path.join(args.embeddings_dir, "mimic-iv-echo-jepa-embeddings", f"jepa-{args.model[3:]}-embeddings")
+    # Derive subfolder: strip echo- prefix, then use full name
+    if args.subfolder:
+        subfolder = args.subfolder
+    else:
+        model_short = args.model.replace("echo-", "")
+        subfolder = f"jepa-{model_short}-embeddings"
+    out_dir = os.path.join(args.embeddings_dir, "mimic-iv-echo-jepa-embeddings", subfolder)
     os.makedirs(out_dir, exist_ok=True)
 
     # Load metadata
@@ -88,6 +96,19 @@ def main():
     study_lookup = build_study_lookup(os.path.join(args.metadata_dir, "echo-study-list.csv"))
     print(f"  {len(study_lookup)} studies")
 
+    active_folders = [f.strip() for f in args.folders.split(",")] if args.folders else FOLDERS
+
+    # Detect embedding dim from first available .pt file
+    embed_dim = 1024
+    for _f in active_folders:
+        _pt = os.path.join(args.embeddings_dir, f"{args.model}_embeddings_{_f}.pt")
+        if os.path.exists(_pt):
+            import torch as _torch
+            _sample = _torch.load(_pt, map_location="cpu", weights_only=False)
+            embed_dim = next(iter(_sample.values())).shape[-1]
+            print(f"Detected embedding dim: {embed_dim}")
+            break
+
     schema = pa.schema([
         ("subject_id", pa.int64()),
         ("study_id", pa.int64()),
@@ -98,15 +119,16 @@ def main():
         ("note_id", pa.string()),
         ("note_seq", pa.string()),
         ("note_charttime", pa.string()),
-        ("embedding", pa.list_(pa.float32(), 1024)),
+        ("embedding", pa.list_(pa.float32(), embed_dim)),
     ])
 
     total_rows = 0
     total_matched_record = 0
     total_matched_study = 0
-    num_shards = len(FOLDERS)
+    num_shards = len(FOLDERS)  # always 10 so shard indices stay consistent
 
-    for i, folder in enumerate(FOLDERS):
+    for folder in active_folders:
+        i = FOLDERS.index(folder)
         pt_path = os.path.join(args.embeddings_dir, f"{args.model}_embeddings_{folder}.pt")
         if not os.path.exists(pt_path):
             print(f"  Skipping {folder}: {pt_path} not found")

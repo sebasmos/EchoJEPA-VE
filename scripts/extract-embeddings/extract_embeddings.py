@@ -177,8 +177,21 @@ def load_model(model_name, checkpoint_path, img_size, num_frames):
         use_rope=True,
     )
 
+    # Stage large checkpoint to node-local /tmp to avoid NFS random-access hangs.
+    # Use a per-task path so concurrent tasks on the same node don't overwrite each other.
+    import shutil as _shutil
+    _task_id = os.environ.get("SLURM_ARRAY_TASK_ID", os.environ.get("SLURM_PROCID", "0"))
+    local_ckpt = f"/tmp/{os.path.basename(checkpoint_path)}.task{_task_id}"
+    nfs_size = os.path.getsize(checkpoint_path)
+    if not os.path.exists(local_ckpt) or os.path.getsize(local_ckpt) != nfs_size:
+        print(f"Staging {nfs_size/1e9:.1f} GB checkpoint to /tmp (avoids NFS hang)...", flush=True)
+        _shutil.copy2(checkpoint_path, local_ckpt)
+        print(f"Staged → {local_ckpt}", flush=True)
+    else:
+        print(f"Using cached /tmp checkpoint: {local_ckpt}", flush=True)
+
     # Load weights — same pattern as notebooks/vjepa2_demo.py:load_pretrained_vjepa_pt_weights
-    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)["encoder"]
+    state_dict = torch.load(local_ckpt, map_location="cpu", weights_only=False)["encoder"]
     clean = {k.replace("module.", "").replace("backbone.", ""): v for k, v in state_dict.items()}
     msg = model.load_state_dict(clean, strict=False)
     print(f"Loaded {model_name} weights: {msg}")

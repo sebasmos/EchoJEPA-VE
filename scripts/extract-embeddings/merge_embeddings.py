@@ -28,11 +28,9 @@ def main():
     out_path = os.path.join(args.embeddings_dir, f"{args.model}_embeddings_all.pt")
     torch.save(combined, out_path)
 
-    all_embs = torch.stack(list(combined.values()))
+    sample = next(iter(combined.values()))
     print(f"\nTotal: {len(combined)} embeddings saved to {out_path}")
-    print(f"Shape: {all_embs.shape}")
-    print(f"Stats: mean={all_embs.mean():.4f}, std={all_embs.std():.4f}")
-    print(f"All finite: {torch.isfinite(all_embs).all()}")
+    print(f"Embedding dim: {sample.shape}")
 
 
 if __name__ == "__main__":
